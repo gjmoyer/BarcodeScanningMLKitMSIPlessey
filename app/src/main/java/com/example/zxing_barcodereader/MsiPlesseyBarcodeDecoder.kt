@@ -105,7 +105,7 @@ object MsiPlesseyBarcodeDecoder {
      * Decode from an already-extracted [GrayImage].
      * Use this when you need to pre-rotate or pre-crop the frame yourself.
      */
-    fun decodeGray(gray: GrayImage): DecodeResult? {
+    private fun decodeGray(gray: GrayImage): DecodeResult? {
         val crop = isolateBarcode(gray) ?: gray   // fall back to full frame
         return decodeBarcode(crop)
     }
@@ -157,7 +157,7 @@ object MsiPlesseyBarcodeDecoder {
      * Respects [ImageProxy.cropRect].
      * Returns null if the format is unsupported.
      */
-    fun extractGrayscale(proxy: ImageProxy): GrayImage? {
+    private fun extractGrayscale(proxy: ImageProxy): GrayImage? {
         if (proxy.format != ImageFormat.YUV_420_888) return null
         
         val rect = proxy.cropRect

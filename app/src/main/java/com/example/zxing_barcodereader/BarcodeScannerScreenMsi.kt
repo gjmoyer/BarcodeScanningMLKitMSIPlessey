@@ -155,14 +155,22 @@ fun BarcodeScannerScreenMsi() {
                             } else {
                                 // ML Kit found nothing → this is where we MUST try MSI
                                 Log.d("BarcodeAnalyzer", "ML Kit returned no barcode → trying MSI Plessey fallback")
-                                val msiResult = MsiPlesseyBarcodeDecoder.decode(imageProxy)
+                                val msiResult = MsiPlesseyBarcodeDecoderV2.decode(imageProxy)
                                 if (msiResult != null) {
                                     detectedResult = BarcodeResult(
                                         value = msiResult.fullDigits,
-                                        format = "MSI Plessey" //msiResult.method
+                                        format = "MSI Plessey1" //msiResult.method
                                     )
                                     isScanning = false
                                 }
+//                                val msiResult2 = MsiPlesseyBarcodeDecoder.decode(imageProxy)
+//                                if (msiResult2 != null) {
+//                                    detectedResult = BarcodeResult(
+//                                        value = msiResult2.fullDigits,
+//                                        format = "MSI Plessey2" //msiResult.method
+//                                    )
+//                                    isScanning = false
+//                                }
                             }
                         }
                         .addOnFailureListener { e ->
