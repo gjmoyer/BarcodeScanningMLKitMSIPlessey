@@ -276,6 +276,9 @@ object MsiPlesseyBarcodeDecoderV3 {
     // Scale factors applied in Phase 4 (after aggressive sharpening).
     // Larger up-scales help when bars are so thin that sharpening alone is insufficient.
     private val SHARP_SCALE_FACTORS = doubleArrayOf(2.0, 3.0)
+    // Frames with more than this many pixels skip Phase 3 and 4 (sharpening sweeps) to avoid
+    // blowing the heap on high-resolution camera inputs.  400K pixels ≈ 1.6 MB per GrayImage.
+    private const val LARGE_FRAME_PIXELS = 400_000L
 
     private val frameLock = Any()
     private val frameScores = mutableMapOf<String, Int>()
@@ -350,6 +353,7 @@ object MsiPlesseyBarcodeDecoderV3 {
      *    11. try at 2× and 3× scale — recovers heavily blurred thin-bar photographs
      */
     fun decodeSingleFrame(gray: GrayImage): DecodeResult? {
+        val pixelCount = gray.width.toLong() * gray.height.toLong()
         // Phase 1: native scale, full rotation sweep
         var best: DecodeResult? = null
         for (rotation in ROTATION_SWEEP_DEGREES) {
@@ -363,19 +367,22 @@ object MsiPlesseyBarcodeDecoderV3 {
             best = chooseBetterDecode(best, decodeSingleOrientation(scaled))
             if (decodeQuality(best) >= STRONG_DECODE_SCORE) return best
         }
-        // Phase 3: moderate sharpening + full rotation sweep (mild-blur recovery)
-        val sharpMod = sharpen(gray, SHARP_STRENGTH_MODERATE)
-        for (rotation in ROTATION_SWEEP_DEGREES) {
-            val oriented = if (rotation == 0.0) sharpMod else rotate(sharpMod, rotation)
-            best = chooseBetterDecode(best, decodeSingleOrientation(oriented))
-            if (decodeQuality(best) >= STRONG_DECODE_SCORE) return best
-        }
-        // Phase 4: aggressive sharpening + scale sweep (heavy-blur / thin-bar last resort)
-        val sharpAgg = sharpen(gray, SHARP_STRENGTH_AGGRESSIVE)
-        for (factor in SHARP_SCALE_FACTORS) {
-            val scaled = scale(sharpAgg, factor)
-            best = chooseBetterDecode(best, decodeSingleOrientation(scaled))
-            if (decodeQuality(best) >= STRONG_DECODE_SCORE) return best
+        // Phases 3/4 (sharpening sweeps) are expensive — skip on large camera frames to avoid OOM.
+        if (pixelCount <= LARGE_FRAME_PIXELS) {
+            // Phase 3: moderate sharpening + full rotation sweep (mild-blur recovery)
+            val sharpMod = sharpen(gray, SHARP_STRENGTH_MODERATE)
+            for (rotation in ROTATION_SWEEP_DEGREES) {
+                val oriented = if (rotation == 0.0) sharpMod else rotate(sharpMod, rotation)
+                best = chooseBetterDecode(best, decodeSingleOrientation(oriented))
+                if (decodeQuality(best) >= STRONG_DECODE_SCORE) return best
+            }
+            // Phase 4: aggressive sharpening + scale sweep (heavy-blur / thin-bar last resort)
+            val sharpAgg = sharpen(gray, SHARP_STRENGTH_AGGRESSIVE)
+            for (factor in SHARP_SCALE_FACTORS) {
+                val scaled = scale(sharpAgg, factor)
+                best = chooseBetterDecode(best, decodeSingleOrientation(scaled))
+                if (decodeQuality(best) >= STRONG_DECODE_SCORE) return best
+            }
         }
         return best
     }
@@ -1136,28 +1143,23 @@ object MsiPlesseyBarcodeDecoderV3 {
     // The most-voted Luhn-valid string wins.  Requiring ≥2 votes prevents a single
     // noisy row from producing a false positive.
 
-    // Run-length encode a binarised row into (isDark, runLength) pairs.
-    // Example: [1,1,0,0,0,1] → [(true,2),(false,3),(true,1)]
-    private fun rle(row: IntArray): List<Pair<Boolean, Int>> {
-        if (row.isEmpty()) return emptyList()
+    // Run-length encode directly from GrayImage pixels, avoiding a per-threshold IntArray
+    // allocation.  Reads pixels directly instead of creating a binarised intermediate array.
+    private fun rleFromRow(img: GrayImage, y: Int, thr: Int): List<Pair<Boolean, Int>> {
+        val w = img.width
+        val p = img.pixels
+        val rowOff = y * w
         val runs = mutableListOf<Pair<Boolean, Int>>()
-        var isDark = row[0] != 0
+        var isDark = p[rowOff] < thr
         var count = 1
-        for (i in 1 until row.size) {
-            val d = row[i] != 0
-            if (d == isDark) {
-                count++
-            } else {
-                runs.add(isDark to count); isDark = d; count = 1
-            }
+        for (x in 1 until w) {
+            val d = p[rowOff + x] < thr
+            if (d == isDark) count++
+            else { runs.add(isDark to count); isDark = d; count = 1 }
         }
         runs.add(isDark to count)
         return runs
     }
-
-    // Binarise a single image row at threshold [thr]: pixels below thr → 1 (dark), else 0.
-    private fun binariseRow(img: GrayImage, y: Int, thr: Int): IntArray =
-        IntArray(img.width) { x -> if (img.pixel(x, y) < thr) 1 else 0 }
 
     // Find the threshold that best separates narrow bars from wide bars in [darkWidths].
     //
@@ -1254,8 +1256,7 @@ object MsiPlesseyBarcodeDecoderV3 {
 
             for (thrPct in 20..80 step 5) {
                 val thr = mn + (mx - mn) * thrPct / 100
-                val bin = binariseRow(img, y, thr)
-                val runs = rle(bin)
+                val runs = rleFromRow(img, y, thr)
                 if (runs.size !in 55..110) continue  // 9-digit MSI produces ≈77 transitions; allow ±30 slack
                 val darkWidths = runs.filter { it.first }.map { it.second }
                 val split = bimodalSplit(darkWidths) ?: continue
@@ -1320,9 +1321,11 @@ object MsiPlesseyBarcodeDecoderV3 {
             if (mx - mn < 30) continue
             rowsScanned++
 
+            val bin = BooleanArray(w) // reusable across thresholds for this row
             for (thrPct in 20..80 step 5) {
                 val thr = mn + (mx - mn) * thrPct / 100
-                val bitRow = BitRow(BooleanArray(w) { x -> p[rowOff + x] < thr })
+                for (x in 0 until w) bin[x] = p[rowOff + x] < thr
+                val bitRow = BitRow(bin)
                 val decoded = zxingDecodeRow(bitRow) ?: continue
                 if (decoded.all { it == decoded[0] }) continue  // all-same-digit = decode artifact
 
