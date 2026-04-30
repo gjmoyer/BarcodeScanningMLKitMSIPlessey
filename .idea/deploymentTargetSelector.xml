@@ -2,7 +2,7 @@
 <project version="4">
   <component name="deploymentTargetSelector">
     <selectionStates>
-      <SelectionState runConfigName="app">
+      <SelectionState runConfigName="ZXing_BarcodeReader">
         <option name="selectionMode" value="DROPDOWN" />
         <DropdownSelection timestamp="2026-04-30T01:51:31.890520Z">
           <Target type="DEFAULT_BOOT">
