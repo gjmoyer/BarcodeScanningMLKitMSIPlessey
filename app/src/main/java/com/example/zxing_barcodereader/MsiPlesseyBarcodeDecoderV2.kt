@@ -82,11 +82,11 @@ object MsiPlesseyBarcodeDecoderV2 {
     //   bit = 0  →  narrow bar (N) + wide space  (W)
 
     private val BITS_TO_DIGIT: Map<List<Int>, Int> = mapOf(
-        listOf(0, 0, 0, 0) to 0,  listOf(0, 0, 0, 1) to 1,
-        listOf(0, 0, 1, 0) to 2,  listOf(0, 0, 1, 1) to 3,
-        listOf(0, 1, 0, 0) to 4,  listOf(0, 1, 0, 1) to 5,
-        listOf(0, 1, 1, 0) to 6,  listOf(0, 1, 1, 1) to 7,
-        listOf(1, 0, 0, 0) to 8,  listOf(1, 0, 0, 1) to 9
+        listOf(0, 0, 0, 0) to 0, listOf(0, 0, 0, 1) to 1,
+        listOf(0, 0, 1, 0) to 2, listOf(0, 0, 1, 1) to 3,
+        listOf(0, 1, 0, 0) to 4, listOf(0, 1, 0, 1) to 5,
+        listOf(0, 1, 1, 0) to 6, listOf(0, 1, 1, 1) to 7,
+        listOf(1, 0, 0, 0) to 8, listOf(1, 0, 0, 1) to 9
     )
 
     // ── ZXing CHARACTER_ENCODINGS (Approach B) ───────────────────────────────────
@@ -96,9 +96,9 @@ object MsiPlesseyBarcodeDecoderV2 {
     private val ZXING_CHARACTER_ENCODINGS = intArrayOf(
         0x924, 0x926, 0x934, 0x936, 0x9A4, 0x9A6, 0x9B4, 0x9B6, 0xD24, 0xD26
     )
-    private const val ZXING_ALPHABET             = "0123456789"
-    private const val ZXING_START          = 0x06   // wide bar  + narrow space
-    private const val ZXING_END            = 0x09   // narrow bar + wide space + narrow bar
+    private const val ZXING_ALPHABET = "0123456789"
+    private const val ZXING_START = 0x06   // wide bar  + narrow space
+    private const val ZXING_END = 0x09   // narrow bar + wide space + narrow bar
 
     // ── Cross-frame confidence accumulator ───────────────────────────────────────
     //
@@ -121,13 +121,13 @@ object MsiPlesseyBarcodeDecoderV2 {
     // Call reset() when the user navigates away or starts scanning a new item,
     // so stale votes from a previous label don't bleed into the next scan.
 
-    private const val SCORE_COMBINED       = 3
-    private const val SCORE_ROW_SCAN       = 2
+    private const val SCORE_COMBINED = 3
+    private const val SCORE_ROW_SCAN = 2
     private const val SCORE_ZXING_ROW_SCAN = 2
-    private const val SCORE_COL_GREEDY     = 1
+    private const val SCORE_COL_GREEDY = 1
     private const val CONFIDENCE_THRESHOLD = 5
 
-    private val frameLock   = Any()
+    private val frameLock = Any()
     private val frameScores = mutableMapOf<String, Int>()
 
     /** Clear all accumulated frame evidence.  Call when starting a new scan. */
@@ -160,14 +160,14 @@ object MsiPlesseyBarcodeDecoderV2 {
      * Accumulates cross-frame confidence the same as [decode].
      */
     private fun decodeGray(gray: GrayImage): DecodeResult? {
-        val crop   = isolateBarcode(gray) ?: gray
+        val crop = isolateBarcode(gray) ?: gray
         val single = decodeBarcode(crop) ?: return null
 
         val points = when (single.method) {
-            "combined"       -> SCORE_COMBINED
-            "row_scan"       -> SCORE_ROW_SCAN
+            "combined" -> SCORE_COMBINED
+            "row_scan" -> SCORE_ROW_SCAN
             "zxing_row_scan" -> SCORE_ZXING_ROW_SCAN
-            else             -> SCORE_COL_GREEDY
+            else -> SCORE_COL_GREEDY
         }
 
         val total = synchronized(frameLock) {
@@ -192,11 +192,12 @@ object MsiPlesseyBarcodeDecoderV2 {
 
     private fun extractGrayscale(proxy: ImageProxy): GrayImage? {
         if (proxy.format != ImageFormat.YUV_420_888) return null
-        val plane       = proxy.planes[0]
-        val rowStride   = plane.rowStride
+        val plane = proxy.planes[0]
+        val rowStride = plane.rowStride
         val pixelStride = plane.pixelStride
-        val w = proxy.width; val h = proxy.height
-        val buf    = plane.buffer
+        val w = proxy.width;
+        val h = proxy.height
+        val buf = plane.buffer
         val pixels = IntArray(w * h)
         for (y in 0 until h)
             for (x in 0 until w)
@@ -207,14 +208,18 @@ object MsiPlesseyBarcodeDecoderV2 {
     // ── Step 2: Barcode band isolation ──────────────────────────────────────────
 
     private fun isolateBarcode(img: GrayImage): GrayImage? {
-        val w = img.width; val h = img.height
-        val scores   = IntArray(h) { y -> rowTransitions(img, y) }
+        val w = img.width;
+        val h = img.height
+        val scores = IntArray(h) { y -> rowTransitions(img, y) }
         val maxScore = scores.maxOrNull() ?: return null
         if (maxScore < 10) return null
         val threshold = maxScore / 3
 
-        var bestStart = 0; var bestEnd = 0; var bestSum = 0
-        var bandStart = -1; var bandSum  = 0
+        var bestStart = 0;
+        var bestEnd = 0;
+        var bestSum = 0
+        var bandStart = -1;
+        var bandSum = 0
 
         for (y in 0 until h) {
             if (scores[y] > threshold) {
@@ -232,24 +237,26 @@ object MsiPlesseyBarcodeDecoderV2 {
         }
         if (bestEnd - bestStart < 5) return null
 
-        val top   = (bestStart - 4).coerceAtLeast(0)
-        val bottom = (bestEnd  + 4).coerceAtMost(h)
+        val top = (bestStart - 4).coerceAtLeast(0)
+        val bottom = (bestEnd + 4).coerceAtMost(h)
         val cropH = bottom - top
-        val out   = IntArray(w * cropH) { i -> img.pixel(i % w, top + i / w) }
+        val out = IntArray(w * cropH) { i -> img.pixel(i % w, top + i / w) }
         return GrayImage(out, w, cropH)
     }
 
     private fun rowTransitions(img: GrayImage, y: Int): Int {
-        val w  = img.width
+        val w = img.width
         val mn = (0 until w).minOf { img.pixel(it, y) }
         val mx = (0 until w).maxOf { img.pixel(it, y) }
         if (mx - mn < 30) return 0
-        val thr  = (mn + mx) / 2
+        val thr = (mn + mx) / 2
         var prev = if (img.pixel(0, y) < thr) 1 else 0
         var count = 0
         for (x in 1 until w) {
             val cur = if (img.pixel(x, y) < thr) 1 else 0
-            if (cur != prev) { count++; prev = cur }
+            if (cur != prev) {
+                count++; prev = cur
+            }
         }
         return count
     }
@@ -265,15 +272,15 @@ object MsiPlesseyBarcodeDecoderV2 {
 
     private fun decodeBarcode(img: GrayImage): DecodeResult? = runBlocking {
         val bimodalJob = async(Dispatchers.Default) { rowScan(img)?.let { luhnNormalize(it) } }
-        val zxingJob   = async(Dispatchers.Default) { zxingRowScan(img)?.let { luhnNormalize(it) } }
-        val bimodal    = bimodalJob.await()
-        val zxing      = zxingJob.await()
+        val zxingJob = async(Dispatchers.Default) { zxingRowScan(img)?.let { luhnNormalize(it) } }
+        val bimodal = bimodalJob.await()
+        val zxing = zxingJob.await()
 
         if (bimodal != null && zxing != null && bimodal.take(7) == zxing.take(7))
             return@runBlocking DecodeResult(bimodal.take(7), bimodal, "combined")
 
         if (bimodal != null) return@runBlocking DecodeResult(bimodal.take(7), bimodal, "row_scan")
-        if (zxing   != null) return@runBlocking DecodeResult(zxing.take(7),   zxing,   "zxing_row_scan")
+        if (zxing != null) return@runBlocking DecodeResult(zxing.take(7), zxing, "zxing_row_scan")
 
         colGreedy(img)?.let { v -> return@runBlocking DecodeResult(v.take(7), v, "col_greedy") }
         null
@@ -283,13 +290,16 @@ object MsiPlesseyBarcodeDecoderV2 {
 
     private fun rle(row: IntArray): List<Pair<Boolean, Int>> {
         if (row.isEmpty()) return emptyList()
-        val runs   = mutableListOf<Pair<Boolean, Int>>()
+        val runs = mutableListOf<Pair<Boolean, Int>>()
         var isDark = row[0] != 0
-        var count  = 1
+        var count = 1
         for (i in 1 until row.size) {
             val d = row[i] != 0
-            if (d == isDark) { count++ }
-            else { runs.add(isDark to count); isDark = d; count = 1 }
+            if (d == isDark) {
+                count++
+            } else {
+                runs.add(isDark to count); isDark = d; count = 1
+            }
         }
         runs.add(isDark to count)
         return runs
@@ -301,13 +311,15 @@ object MsiPlesseyBarcodeDecoderV2 {
     private fun bimodalSplit(darkWidths: List<Int>): Double? {
         if (darkWidths.size < 6) return null
         val trimmed = darkWidths.sorted().dropLast(2)
-        val vals    = trimmed.toSortedSet().toList()
+        val vals = trimmed.toSortedSet().toList()
         if (vals.size < 2) return null
-        var bestGap   = 0
+        var bestGap = 0
         var bestSplit = 0.0
         for (i in 0 until vals.size - 1) {
             val gap = vals[i + 1] - vals[i]
-            if (gap > bestGap) { bestGap = gap; bestSplit = (vals[i] + vals[i + 1]) / 2.0 }
+            if (gap > bestGap) {
+                bestGap = gap; bestSplit = (vals[i] + vals[i + 1]) / 2.0
+            }
         }
         return if (bestGap >= 1) bestSplit else null
     }
@@ -315,13 +327,15 @@ object MsiPlesseyBarcodeDecoderV2 {
     private fun decodeRuns(runs: List<Pair<Boolean, Int>>, split: Double): String? {
         var pos = -1
         for (i in runs.indices) {
-            if (runs[i].first && runs[i].second > split) { pos = i + 2; break }
+            if (runs[i].first && runs[i].second > split) {
+                pos = i + 2; break
+            }
         }
         if (pos < 0) return null
 
         val sb = StringBuilder()
         while (pos + 6 < runs.size) {
-            val bits  = List(4) { j -> if (runs[pos + j * 2].second > split) 1 else 0 }
+            val bits = List(4) { j -> if (runs[pos + j * 2].second > split) 1 else 0 }
             val digit = BITS_TO_DIGIT[bits] ?: break
             sb.append(digit)
             pos += 8
@@ -331,7 +345,7 @@ object MsiPlesseyBarcodeDecoderV2 {
 
     private fun rowScan(img: GrayImage): String? {
         val validVotes = mutableMapOf<String, Int>()
-        val rawVotes   = mutableMapOf<String, Int>()
+        val rawVotes = mutableMapOf<String, Int>()
 
         for (y in 0 until img.height) {
             val mn = (0 until img.width).minOf { img.pixel(it, y) }
@@ -339,24 +353,24 @@ object MsiPlesseyBarcodeDecoderV2 {
             if (mx - mn < 30) continue
 
             for (thrPct in 20..80 step 5) {
-                val thr  = mn + (mx - mn) * thrPct / 100
-                val bin  = binariseRow(img, y, thr)
+                val thr = mn + (mx - mn) * thrPct / 100
+                val bin = binariseRow(img, y, thr)
                 val runs = rle(bin)
                 if (runs.size !in 55..110) continue
                 val darkWidths = runs.filter { it.first }.map { it.second }
                 val split = bimodalSplit(darkWidths) ?: continue
-                val value = decodeRuns(runs, split)   ?: continue
+                val value = decodeRuns(runs, split) ?: continue
                 if (value.length < 7) continue
                 if (value.all { it == value[0] }) continue  // all-same-digit = decode artifact
 
                 val normed = luhnNormalize(value)
                 if (normed != null) validVotes[normed] = (validVotes[normed] ?: 0) + 1
-                else                rawVotes  [value]  = (rawVotes  [value]  ?: 0) + 1
+                else rawVotes[value] = (rawVotes[value] ?: 0) + 1
             }
         }
 
         validVotes.maxByOrNull { it.value }?.takeIf { it.value >= 2 }?.let { return it.key }
-        rawVotes  .maxByOrNull { it.value }?.takeIf { it.value >= 2 }?.let { return it.key }
+        rawVotes.maxByOrNull { it.value }?.takeIf { it.value >= 2 }?.let { return it.key }
         return null
     }
 
@@ -368,7 +382,7 @@ object MsiPlesseyBarcodeDecoderV2 {
 
     private fun zxingRowScan(img: GrayImage): String? {
         val validVotes = mutableMapOf<String, Int>()
-        val rawVotes   = mutableMapOf<String, Int>()
+        val rawVotes = mutableMapOf<String, Int>()
 
         for (y in 0 until img.height) {
             val mn = (0 until img.width).minOf { img.pixel(it, y) }
@@ -376,28 +390,28 @@ object MsiPlesseyBarcodeDecoderV2 {
             if (mx - mn < 30) continue
 
             for (thrPct in 20..80 step 5) {
-                val thr    = mn + (mx - mn) * thrPct / 100
+                val thr = mn + (mx - mn) * thrPct / 100
                 val bitRow = BitRow(BooleanArray(img.width) { x -> img.pixel(x, y) < thr })
                 val decoded = zxingDecodeRow(bitRow) ?: continue
                 if (decoded.all { it == decoded[0] }) continue  // all-same-digit = decode artifact
 
                 val normed = luhnNormalize(decoded)
                 if (normed != null) validVotes[normed] = (validVotes[normed] ?: 0) + 1
-                else                rawVotes  [decoded] = (rawVotes  [decoded] ?: 0) + 1
+                else rawVotes[decoded] = (rawVotes[decoded] ?: 0) + 1
             }
         }
 
         validVotes.maxByOrNull { it.value }?.takeIf { it.value >= 2 }?.let { return it.key }
-        rawVotes  .maxByOrNull { it.value }?.takeIf { it.value >= 2 }?.let { return it.key }
+        rawVotes.maxByOrNull { it.value }?.takeIf { it.value >= 2 }?.let { return it.key }
         return null
     }
 
     private fun zxingDecodeRow(row: BitRow): String? {
-        val counters  = IntArray(8)
-        val start     = zxingFindStart(row, counters) ?: return null
-        val avgWidth  = start[2]
+        val counters = IntArray(8)
+        val start = zxingFindStart(row, counters) ?: return null
+        val avgWidth = start[2]
         var nextStart = row.getNextSet(start[1])
-        val result    = StringBuilder()
+        val result = StringBuilder()
 
         while (true) {
             if (!zxingRecordPattern(row, nextStart, counters, 8)) {
@@ -421,11 +435,11 @@ object MsiPlesseyBarcodeDecoderV2 {
     /** Find start guard: wide bar + narrow space (0x06).
      *  Returns intArrayOf(startX, endX, avgWidth) or null. */
     private fun zxingFindStart(row: BitRow, counters: IntArray): IntArray? {
-        val width     = row.size
+        val width = row.size
         val rowOffset = row.getNextSet(0)
-        var cp        = 0
-        var ps        = rowOffset
-        var isWhite   = false
+        var cp = 0
+        var ps = rowOffset
+        var isWhite = false
 
         counters[0] = 0; counters[1] = 0
 
@@ -459,10 +473,15 @@ object MsiPlesseyBarcodeDecoderV2 {
     }
 
     /** Find end guard: narrow bar + wide space + narrow bar (0x09). */
-    private fun zxingFindEnd(row: BitRow, rowOffset: Int, counters: IntArray, avgWidth: Int): IntArray? {
-        val width   = row.size
-        var cp      = 0
-        var ps      = rowOffset
+    private fun zxingFindEnd(
+        row: BitRow,
+        rowOffset: Int,
+        counters: IntArray,
+        avgWidth: Int
+    ): IntArray? {
+        val width = row.size
+        var cp = 0
+        var ps = rowOffset
         var isWhite = false
 
         counters[0] = 0; counters[1] = 0; counters[2] = 0
@@ -474,7 +493,12 @@ object MsiPlesseyBarcodeDecoderV2 {
                 if (cp == 2) {
                     if (counters[0] != 0) {
                         val factor = counters[1].toFloat() / counters[0].toFloat()
-                        if (factor in 1.5f..5.0f && zxingToPattern(counters, 3, avgWidth) == ZXING_END) {
+                        if (factor in 1.5f..5.0f && zxingToPattern(
+                                counters,
+                                3,
+                                avgWidth
+                            ) == ZXING_END
+                        ) {
                             val minEnd = min(row.size - 1, i + ((i - ps) shr 1))
                             if (row.isRange(i, minEnd, false))
                                 return intArrayOf(ps, i)
@@ -494,10 +518,12 @@ object MsiPlesseyBarcodeDecoderV2 {
         for (i in 0 until n) counters[i] = 0
         if (start >= row.size) return false
         var isWhite = !row[start]
-        var cp = 0; var i = start
+        var cp = 0;
+        var i = start
         while (i < row.size) {
-            if (row[i] xor isWhite) { counters[cp]++ }
-            else {
+            if (row[i] xor isWhite) {
+                counters[cp]++
+            } else {
                 cp++
                 if (cp == n) break
                 counters[cp] = 1
@@ -509,7 +535,8 @@ object MsiPlesseyBarcodeDecoderV2 {
     }
 
     private fun zxingCalcAvgWidth(counters: IntArray, len: Int): Int {
-        var mn = Int.MAX_VALUE; var mx = 0
+        var mn = Int.MAX_VALUE;
+        var mx = 0
         for (i in 0 until len) {
             if (counters[i] < mn) mn = counters[i]
             if (counters[i] > mx) mx = counters[i]
@@ -518,13 +545,15 @@ object MsiPlesseyBarcodeDecoderV2 {
     }
 
     private fun zxingToPattern(counters: IntArray, len: Int, avgWidth: Int): Int {
-        var pattern = 0; var bit = 1; var doubleBit = 3
+        var pattern = 0;
+        var bit = 1;
+        var doubleBit = 3
         for (i in 0 until len) {
             if ((counters[i] shl 8) < avgWidth)
                 pattern = (pattern shl 1) or bit
             else
                 pattern = (pattern shl 2) or doubleBit
-            bit       = bit       xor 1
+            bit = bit xor 1
             doubleBit = doubleBit xor 3
         }
         return pattern
@@ -539,24 +568,29 @@ object MsiPlesseyBarcodeDecoderV2 {
     // ── Fallback: Column greedy ──────────────────────────────────────────────────
 
     private fun colSignal(img: GrayImage): DoubleArray? {
-        val w      = img.width; val h = img.height
+        val w = img.width;
+        val h = img.height
         val pctIdx = (h * 0.10).toInt().coerceAtLeast(0)
-        val sig    = DoubleArray(w) { x ->
+        val sig = DoubleArray(w) { x ->
             val col = DoubleArray(h) { y -> img.pixel(x, y).toDouble() }.also { it.sort() }
             col[pctIdx]
         }
-        val mn = sig.minOrNull()!!; val mx = sig.maxOrNull()!!
+        val mn = sig.minOrNull()!!;
+        val mx = sig.maxOrNull()!!
         if (mx - mn < 10.0) return null
         return DoubleArray(w) { x -> 1.0 - (sig[x] - mn) / (mx - mn) }
     }
 
     private fun greedy(sig: DoubleArray, N: Double, W: Double, offset: Int): String? {
-        val nPx = N.roundToInt(); val wPx = W.roundToInt(); val pw = nPx + wPx
-        var x   = offset + wPx + nPx
-        val sb  = StringBuilder()
+        val nPx = N.roundToInt();
+        val wPx = W.roundToInt();
+        val pw = nPx + wPx
+        var x = offset + wPx + nPx
+        val sb = StringBuilder()
         while (x + pw * 4 <= sig.size && sb.length < 12) {
             val bits = List(4) { j ->
-                val s = x + j * pw; val e = (s + pw).coerceAtMost(sig.size)
+                val s = x + j * pw;
+                val e = (s + pw).coerceAtMost(sig.size)
                 var sum = 0.0; for (k in s until e) sum += sig[k]
                 if (sum / (e - s) > 0.5) 1 else 0
             }
@@ -568,15 +602,17 @@ object MsiPlesseyBarcodeDecoderV2 {
     }
 
     private fun colGreedy(img: GrayImage): String? {
-        val sig   = colSignal(img) ?: return null
-        val w     = sig.size
+        val sig = colSignal(img) ?: return null
+        val w = sig.size
         val votes = mutableMapOf<String, Int>()
 
         var N = 1.5
         while (N <= 5.0) {
             for (ratioStep in 0..2) {
-                val W    = N * (2.0 + ratioStep * 0.5)
-                val nPx  = N.roundToInt(); val wPx = W.roundToInt(); val pw = nPx + wPx
+                val W = N * (2.0 + ratioStep * 0.5)
+                val nPx = N.roundToInt();
+                val wPx = W.roundToInt();
+                val pw = nPx + wPx
                 val minW = wPx + nPx + 7 * 4 * pw + nPx + wPx + nPx
                 if (minW > w) continue
                 val maxOff = min(w - minW, 80)
@@ -597,7 +633,9 @@ object MsiPlesseyBarcodeDecoderV2 {
         var total = 0
         digits.reversed().forEachIndexed { i, ch ->
             var d = ch.digitToInt()
-            if (i % 2 == 0) { d *= 2; if (d > 9) d -= 9 }
+            if (i % 2 == 0) {
+                d *= 2; if (d > 9) d -= 9
+            }
             total += d
         }
         return '0' + (10 - total % 10) % 10
@@ -609,21 +647,23 @@ object MsiPlesseyBarcodeDecoderV2 {
         }
         return null
     }
-}
+
 
 // ── BitRow ────────────────────────────────────────────────────────────────────
 // Private to this file; wraps a binarised image row for the ZXing approach.
 
-private class BitRow(val bits: BooleanArray) {
-    val size: Int get() = bits.size
-    operator fun get(i: Int): Boolean = bits[i]
-    fun getNextSet(from: Int): Int {
-        for (i in from until bits.size) if (bits[i]) return i
-        return bits.size
-    }
-    fun isRange(start: Int, end: Int, value: Boolean): Boolean {
-        if (start >= end) return true
-        for (i in start until end) if (bits[i] != value) return false
-        return true
+    private class BitRow(val bits: BooleanArray) {
+        val size: Int get() = bits.size
+        operator fun get(i: Int): Boolean = bits[i]
+        fun getNextSet(from: Int): Int {
+            for (i in from until bits.size) if (bits[i]) return i
+            return bits.size
+        }
+
+        fun isRange(start: Int, end: Int, value: Boolean): Boolean {
+            if (start >= end) return true
+            for (i in start until end) if (bits[i] != value) return false
+            return true
+        }
     }
 }
