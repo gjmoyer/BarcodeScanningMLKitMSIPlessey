@@ -1009,7 +1009,11 @@ private fun luhnCheck(digits: String): Char {
 
 private fun luhnNormalize(s: String): String? {
     for (n in min(s.length, 10) downTo 8) {
-        if (luhnCheck(s.substring(0, n - 1)) == s[n - 1]) return s.substring(0, n)
+        if (luhnCheck(s.substring(0, n - 1)) == s[n - 1]) {
+            val result = s.substring(0, n)
+            if (result.all { it == '0' }) return null
+            return result
+        }
     }
     return null
 }
@@ -1027,52 +1031,72 @@ fun main() {
         return
     }
 
+    // Rotation angles to test (degrees clockwise applied BEFORE decodeSingleFrame).
+    // decodeSingleFrame's internal sweep should correct these back to upright.
+    val testAngles = doubleArrayOf(0.0, -12.0, 12.0, -24.0, 24.0, -30.0, 30.0)
+
     println("MSI Plessey V3 Decoder — Test Harness")
     println("======================================")
-    println("Found ${pngFiles.size} sample images\n")
+    println("Found ${pngFiles.size} sample images, testing at ${testAngles.size} rotations each\n")
 
     var passed = 0
     var failed = 0
     var errors = 0
+    var totalMs = 0L
 
     for (file in pngFiles) {
-        // Expected value is the filename without extension
         val expected = file.nameWithoutExtension
 
         print("${file.name}: ")
         try {
             val gray = loadGrayImage(file.absolutePath)
-            print("${gray.width}x${gray.height} → ")
+            print("${gray.width}x${gray.height}")
 
-            val startTime = System.currentTimeMillis()
-            val result = decodeSingleFrame(gray)
-            val elapsed = System.currentTimeMillis() - startTime
+            var filePassed = 0
+            var fileFailed = 0
+            val angleResults = mutableListOf<String>()
 
-            if (result == null) {
-                println("FAIL (no decode result) [${elapsed}ms]")
-                failed++
-            } else {
-                val match = result.digits7 == expected
-                val status = if (match) "PASS" else "FAIL"
-                print("$status — digits7=${result.digits7}, full=${result.fullDigits}, method=${result.method} [${elapsed}ms]")
+            for (angle in testAngles) {
+                val testImage = if (angle == 0.0) gray else rotate(gray, angle)
 
-                if (!match) {
-                    println(" <— expected digits7=$expected")
+                val startTime = System.currentTimeMillis()
+                val result = decodeSingleFrame(testImage)
+                val elapsed = System.currentTimeMillis() - startTime
+                totalMs += elapsed
+
+                val angleLabel = if (angle == 0.0) "  0°" else if (angle > 0) "+%2d°".format(angle.toInt()) else "%3d°".format(angle.toInt())
+
+                if (result == null) {
+                    angleResults.add("$angleLabel=FAIL(no result,${elapsed}ms)")
+                    fileFailed++
                     failed++
                 } else {
-                    println()
-                    passed++
+                    val match = result.digits7 == expected
+                    if (match) {
+                        angleResults.add("$angleLabel=PASS(${elapsed}ms)")
+                        filePassed++
+                        passed++
+                    } else {
+                        angleResults.add("$angleLabel=FAIL(got ${result.digits7},${elapsed}ms)")
+                        fileFailed++
+                        failed++
+                    }
                 }
             }
+
+            println(" → ${filePassed}/${testAngles.size} passed" + if (fileFailed > 0) " (${fileFailed} failed)" else "")
+            for (r in angleResults) println("         $r")
         } catch (e: Exception) {
-            println("ERROR: ${e.message}")
+            println(" → ERROR: ${e.message}")
             errors++
         }
     }
 
     println()
     println("======================================")
-    println("Results: $passed passed, $failed failed, $errors errors out of ${pngFiles.size} total")
+    println("Results: $passed passed, $failed failed, $errors errors")
+    println("Total decode time: ${totalMs}ms across ${passed + failed} tests")
+    println("Average per test: ${if (passed + failed > 0) totalMs / (passed + failed) else 0}ms")
 
     if (failed > 0 || errors > 0) {
         kotlin.system.exitProcess(1)

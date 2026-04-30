@@ -27,6 +27,8 @@ A standalone Kotlin/JVM test harness that runs the V3 decoder logic against samp
 
 9 sample images (356–541 × 83–140 px RGBA PNGs). Filename is the expected `digits7` value (code less the checksum).
 
+**Rotation testing:** The harness now tests each sample at 7 rotation angles (0°, ±12°, ±24°, ±30°) — 63 tests total. Expect 62/63 pass (one edge case on `0282137.png` at +12° where bilinear interpolation artifacts confuse the RLE).
+
 ### Compile & Run
 
 ```sh

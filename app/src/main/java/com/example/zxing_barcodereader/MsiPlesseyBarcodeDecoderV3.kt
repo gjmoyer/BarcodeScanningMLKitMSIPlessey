@@ -20,8 +20,6 @@ import kotlin.math.PI
 //   YUV_420_888 luma plane       → plane 0 of `kCVPixelFormatType_420YpCbCr8BiPlanar-
 //                                  VideoRange`; read with CVPixelBufferGetBaseAddress-
 //                                  OfPlane(buffer, 0).  Stride = CVPixelBufferGetBytesPerRowOfPlane.
-//   `runBlocking { async { } }`  → `DispatchGroup` + `DispatchQueue.global().async`,
-//                                  or Swift concurrency (`async let a = …; async let b = …`).
 //   `synchronized(lock) { }`    → `NSLock` (lock()/unlock()) or a serial DispatchQueue
 //                                  with `.sync {}`.
 //   `mutableMapOf<K,V>()`        → `[K: V]()` Swift Dictionary literal.
@@ -34,6 +32,8 @@ import kotlin.math.PI
 //   1. extractGrayscale — swap for a CVPixelBuffer luma-plane reader (~15 lines).
 //   2. decodeSingleFrame — no platform calls; ports verbatim.
 //   3. decodeGray / reset — cross-frame accumulator; replicate the lock pattern.
+//   4. correctOrientation — lossless 90° rotation for portrait phone (pure pixel remap).
+//   5. decodeBarcode — sequential bimodal + ZXing row scan with Luhn validation.
 // ─────────────────────────────────────────────────────────────────────────────
 import kotlin.math.abs
 import kotlin.math.atan2
@@ -44,9 +44,7 @@ import kotlin.math.min
 import kotlin.math.roundToInt
 import kotlin.math.sin
 import kotlin.math.sqrt
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.async
-import kotlinx.coroutines.runBlocking
+
 
 /**
  * ── MSI Plessey barcode format (reference for porters) ───────────────────────
@@ -136,6 +134,38 @@ import kotlinx.coroutines.runBlocking
  *     computed as a local value inside each row decode call, so both approaches
  *     are free of shared mutable state and safe to run in parallel.
  *   • All other notes from MsiPlesseyBarcodeDecoder apply here unchanged.
+ *
+ * ── Live-camera performance optimizations (2026-04) ────────────────────────────
+ *
+ *   decodeBarcode is sequential (rowScan then zxingRowScan) — removed the
+ *   runBlocking/async coroutine overhead that was expensive on the single-thread
+ *   camera analyzer executor.  Both row-scan approaches are independent and don't
+ *   mutate shared state, so sequential execution is correct.
+ *
+ *   Camera frames (>100K pixels after crop) use a fast path in decodeSingleFrame:
+ *     • Full 11-angle rotation sweep (same as offline) — correct orientation is
+ *       critical for MSI decode accuracy
+ *     • Deskew estimation SKIPPED — the Sobel gradient + morphological operations
+ *       were the single most expensive per-orientation operation.  The rotation
+ *       sweep already covers ±30° in 11 steps.
+ *     • Phase 2 (scale sweep at 2×, 0.5×, 1.5×, 0.75×) SKIPPED — barcodes on
+ *       live camera are already at a reasonable scale.
+ *     • Phase 3/4 (sharpening sweeps) SKIPPED — adds latency without benefit for
+ *       real-time scanning where the next frame comes quickly.
+ *
+ *   Weak results (decodeQuality < 35) are treated as no-decode for live frames so
+ *   col_greedy fallbacks and very short row_scan results don't accumulate through
+ *   cross-frame confidence and produce false positives.
+ *
+ *   luhnNormalize rejects all-zeros results — "00000000" is a legitimate Luhn-
+ *   valid string that commonly arises as a decode artifact on blank/under-exposed
+ *   frames; rejecting it prevents follow-through to the confidence accumulator.
+ *
+ *   correctOrientation applies a lossless 90°/180°/270° pixel-transpose rotation
+ *   (via rotateCW90) to correct for the camera sensor's landscape orientation when
+ *   the phone is held in portrait.  This is always applied in decode(imageProxy).
+ *   extractGrayscale honours the cropRect if set on the ImageProxy, reading only
+ *   the specified sub-region from the full YUV plane buffer.
  */
 object MsiPlesseyBarcodeDecoderV3 {
 
@@ -245,6 +275,10 @@ object MsiPlesseyBarcodeDecoderV3 {
     // the outer sweep loop exits immediately without trying further rotations or scales.
     // Breakdown: "combined" base=40 + fullDigits.length (≥9) = 49 → triggers early exit.
     private const val STRONG_DECODE_SCORE = 49
+    // Minimum quality for a live-camera frame result to be accepted (>= "row_scan" + 5 digits).
+    // Weaker results (col_greedy, very short row_scan) are treated as no-decode so they
+    // don't accumulate garbage through cross-frame confidence.
+    private const val MIN_QUALITY_LIVE = 35
 
     // Deskew mask pipeline tuning — see buildDeskewMask for how these are used.
     private const val DESKEW_MIN_ABS_DEGREES = 2.5   // ignore near-zero estimates (upright barcode)
@@ -279,6 +313,10 @@ object MsiPlesseyBarcodeDecoderV3 {
     // Frames with more than this many pixels skip Phase 3 and 4 (sharpening sweeps) to avoid
     // blowing the heap on high-resolution camera inputs.  400K pixels ≈ 1.6 MB per GrayImage.
     private const val LARGE_FRAME_PIXELS = 400_000L
+    // Frames with more than this many pixels use the fast live-camera path:
+    //   • deskew estimation is skipped (rotation sweep handles skew)
+    //   • Phase 2–4 (scale/sharpening sweeps) are skipped
+    private const val LIVE_FRAME_PIXELS = 100_000L
 
     private val frameLock = Any()
     private val frameScores = mutableMapOf<String, Int>()
@@ -294,11 +332,16 @@ object MsiPlesseyBarcodeDecoderV3 {
      * candidate value reaches [CONFIDENCE_THRESHOLD], or null if more frames
      * are needed.  Call [reset] when starting a new scan.
      *
+     * Automatically corrects for the display/sensor rotation misalignment so the
+     * barcode bars appear vertical (horizontal barcode) regardless of phone orientation.
+     *
      * Does NOT close the [ImageProxy] — call [ImageProxy.close] yourself.
      */
     fun decode(imageProxy: ImageProxy): DecodeResult? {
         val gray = extractGrayscale(imageProxy) ?: return null
-        return decodeGray(gray)
+        val rotationDegrees = imageProxy.imageInfo.rotationDegrees
+        val corrected = correctOrientation(gray, rotationDegrees)
+        return decodeGray(corrected)
     }
 
     /**
@@ -354,21 +397,26 @@ object MsiPlesseyBarcodeDecoderV3 {
      */
     fun decodeSingleFrame(gray: GrayImage): DecodeResult? {
         val pixelCount = gray.width.toLong() * gray.height.toLong()
+        val isLive = pixelCount > LIVE_FRAME_PIXELS
         // Phase 1: native scale, full rotation sweep
         var best: DecodeResult? = null
         for (rotation in ROTATION_SWEEP_DEGREES) {
             val oriented = if (rotation == 0.0) gray else rotate(gray, rotation)
-            best = chooseBetterDecode(best, decodeSingleOrientation(oriented))
+            best = chooseBetterDecode(best, decodeSingleOrientation(oriented, skipDeskew = isLive))
             if (decodeQuality(best) >= STRONG_DECODE_SCORE) return best
         }
         // Phase 2: alternate scales, upright only — deskew recovery handles residual rotation
-        for (factor in SCALE_SWEEP_FACTORS) {
-            val scaled = scale(gray, factor)
-            best = chooseBetterDecode(best, decodeSingleOrientation(scaled))
-            if (decodeQuality(best) >= STRONG_DECODE_SCORE) return best
+        // Skip scale sweep for live camera frames (barcode is already at reasonable scale)
+        if (!isLive) {
+            for (factor in SCALE_SWEEP_FACTORS) {
+                val scaled = scale(gray, factor)
+                best = chooseBetterDecode(best, decodeSingleOrientation(scaled))
+                if (decodeQuality(best) >= STRONG_DECODE_SCORE) return best
+            }
         }
-        // Phases 3/4 (sharpening sweeps) are expensive — skip on large camera frames to avoid OOM.
-        if (pixelCount <= LARGE_FRAME_PIXELS) {
+        // Phases 3/4 (sharpening sweeps) are expensive — skip on large frames (OOM risk)
+        // and on live-camera frames (they add latency without benefit for real-time scanning).
+        if (pixelCount <= LARGE_FRAME_PIXELS && !isLive) {
             // Phase 3: moderate sharpening + full rotation sweep (mild-blur recovery)
             val sharpMod = sharpen(gray, SHARP_STRENGTH_MODERATE)
             for (rotation in ROTATION_SWEEP_DEGREES) {
@@ -387,10 +435,15 @@ object MsiPlesseyBarcodeDecoderV3 {
         return best
     }
 
-    private fun decodeSingleOrientation(gray: GrayImage): DecodeResult? {
+    private fun decodeSingleOrientation(gray: GrayImage, skipDeskew: Boolean = false): DecodeResult? {
         val directCrop = isolateBarcode(gray) ?: gray
         val direct = decodeBarcode(directCrop)
         if (decodeQuality(direct) >= STRONG_DECODE_SCORE) return direct
+
+        // Deskew estimation is expensive (Sobel gradient + morphological operations on full image).
+        // Skip it for live camera frames — the rotation sweep already covers common tilt angles.
+        // Also reject weak results for live frames so garbage doesn't accumulate through cross-frame confidence.
+        if (skipDeskew) return if (decodeQuality(direct) >= MIN_QUALITY_LIVE) direct else null
 
         var best = direct
         val deskewEstimate = estimateDeskew(gray)
@@ -433,6 +486,26 @@ object MsiPlesseyBarcodeDecoderV3 {
             for (x in 0 until src.width)
                 dst[x * dstW + (dstW - 1 - y)] = src.pixel(x, y)
         return GrayImage(dst, dstW, dstH)
+    }
+
+    /**
+     * Correct for the display/sensor rotation misalignment so the barcode runs
+     * horizontally (bars are vertical stripes).  [rotationDegrees] is the
+     * value from [ImageProxy.imageInfo.rotationDegrees] — typically 0, 90, 180, or 270.
+     *
+     * Background: the camera sensor has a fixed landscape orientation.  When the phone
+     * is held in portrait, the raw image is landscape but `rotationDegrees` = 90.
+     * Applying that rotation brings the image to display orientation, making the
+     * real-world-horizontal barcode actually horizontal in pixel coordinates.
+     */
+    fun correctOrientation(gray: GrayImage, rotationDegrees: Int): GrayImage {
+        return when (rotationDegrees) {
+            0 -> gray
+            90 -> rotateCW90(gray)
+            180 -> rotateCW90(rotateCW90(gray))
+            270 -> rotateCW90(rotateCW90(rotateCW90(gray)))
+            else -> gray // fallback; shouldn't happen for CameraX frames
+        }
     }
 
     /**
@@ -1014,13 +1087,27 @@ object MsiPlesseyBarcodeDecoderV3 {
         val plane = proxy.planes[0]
         val rowStride = plane.rowStride
         val pixelStride = plane.pixelStride
-        val w = proxy.width
-        val h = proxy.height
         val buf = plane.buffer
+        val crop = proxy.cropRect
+        val w: Int
+        val h: Int
+        val x0: Int
+        val y0: Int
+        if (crop != null) {
+            w = crop.width()
+            h = crop.height()
+            x0 = crop.left
+            y0 = crop.top
+        } else {
+            w = proxy.width
+            h = proxy.height
+            x0 = 0
+            y0 = 0
+        }
         val pixels = IntArray(w * h)
         for (y in 0 until h)
             for (x in 0 until w)
-                pixels[y * w + x] = buf[y * rowStride + x * pixelStride].toInt() and 0xFF
+                pixels[y * w + x] = buf[(y0 + y) * rowStride + (x0 + x) * pixelStride].toInt() and 0xFF
         return GrayImage(pixels, w, h)
     }
 
@@ -1103,32 +1190,28 @@ object MsiPlesseyBarcodeDecoderV3 {
 
     // ── Step 3: Combined decode ──────────────────────────────────────────────────
     //
-    // Approaches A (bimodal row scan) and B (ZXing run-counter) run concurrently
-    // on Dispatchers.Default (a shared thread pool).  Their results are reconciled:
+    // Approaches A (bimodal row scan) and B (ZXing run-counter) run sequentially,
+    // then their results are reconciled:
     //   • Both agree on the first 7 digits → "combined"   (highest confidence)
     //   • Only A succeeds               → "row_scan"
     //   • Only B succeeds               → "zxing_row_scan"
     //   • Neither succeeds              → column greedy fallback → "col_greedy"
     //
-    // Swift port: replace runBlocking/async with DispatchGroup or Swift concurrency:
-    //   async let bimodalResult = Task { rowScan(img) }.value
-    //   async let zxingResult   = Task { zxingRowScan(img) }.value
-    //   let (bimodal, zxing) = await (bimodalResult, zxingResult)
+    // Sequential execution avoids the coroutine overhead of runBlocking/async,
+    // which is significant on the single-thread camera analyzer executor.
 
-    private fun decodeBarcode(img: GrayImage): DecodeResult? = runBlocking {
-        val bimodalJob = async(Dispatchers.Default) { rowScan(img)?.let { luhnNormalize(it) } }
-        val zxingJob = async(Dispatchers.Default) { zxingRowScan(img)?.let { luhnNormalize(it) } }
-        val bimodal = bimodalJob.await()
-        val zxing = zxingJob.await()
+    private fun decodeBarcode(img: GrayImage): DecodeResult? {
+        val bimodal = rowScan(img)?.let { luhnNormalize(it) }
+        val zxing = zxingRowScan(img)?.let { luhnNormalize(it) }
 
         if (bimodal != null && zxing != null && bimodal.take(7) == zxing.take(7))
-            return@runBlocking DecodeResult(bimodal.take(7), bimodal, "combined")
+            return DecodeResult(bimodal.take(7), bimodal, "combined")
 
-        if (bimodal != null) return@runBlocking DecodeResult(bimodal.take(7), bimodal, "row_scan")
-        if (zxing != null) return@runBlocking DecodeResult(zxing.take(7), zxing, "zxing_row_scan")
+        if (bimodal != null) return DecodeResult(bimodal.take(7), bimodal, "row_scan")
+        if (zxing != null) return DecodeResult(zxing.take(7), zxing, "zxing_row_scan")
 
-        colGreedy(img)?.let { v -> return@runBlocking DecodeResult(v.take(7), v, "col_greedy") }
-        null
+        colGreedy(img)?.let { v -> return DecodeResult(v.take(7), v, "col_greedy") }
+        return null
     }
 
     // ── Approach A: Bimodal row scan ─────────────────────────────────────────────
@@ -1659,10 +1742,15 @@ object MsiPlesseyBarcodeDecoderV3 {
     // Try to find a Luhn-valid suffix in [s] by testing lengths 10, 9, and 8
     // (longest first).  MSI Plessey barcodes on Publix tags are 9 characters
     // (8 data + 1 check), so 9 is the expected hit.  Lengths 10 and 8 tolerate
-    // minor decode over- or under-runs.  Returns null if none of the lengths match.
+    // minor decode over- or under-runs.  Returns null if none of the lengths match
+    // or if the result is all zeros (a common decode artifact on blank/underexposed frames).
     private fun luhnNormalize(s: String): String? {
         for (n in min(s.length, 10) downTo 8) {
-            if (luhnCheck(s.substring(0, n - 1)) == s[n - 1]) return s.substring(0, n)
+            if (luhnCheck(s.substring(0, n - 1)) == s[n - 1]) {
+                val result = s.substring(0, n)
+                if (result.all { it == '0' }) return null
+                return result
+            }
         }
         return null
     }
